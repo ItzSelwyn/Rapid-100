@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environment
+venv/
+env/
+rapidenv/
+
+# AI / ML models
+*.pt
+*.pth
+*.onnx
+*.h5
+
+# Audio
+*.wav
+*.mp3
+
+# Node
+node_modules/
+
+# Build
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+secrets.json
+credentials.json
