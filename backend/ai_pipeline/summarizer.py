@@ -1,16 +1,21 @@
 class Summarizer:
 
-    def build_summary(self, text, category, severity, entities):
+    def build_summary(self, transcript, category, severity, entities):
 
-        return f"""
+        risks = ", ".join(entities.get("risks", [])) or "None"
+        victims = entities.get("victims", "Unknown")
+        location = entities.get("location", "Unknown")
+
+        summary = f"""
 EMERGENCY REPORT
 Type: {category.upper()}
 Severity: {severity.upper()}
 
 Details:
-{text}
+{transcript}
 
-Detected Risks: {', '.join(entities['risks']) if entities['risks'] else 'None'}
-Victims: {entities['victims'] if entities['victims'] else 'Unknown'}
-Location Hint: {entities['location_hint'] if entities['location_hint'] else 'Unknown'}
+Detected Risks: {risks}
+Victims: {victims}
+Location Hint: {location}
 """
+        return summary.strip()

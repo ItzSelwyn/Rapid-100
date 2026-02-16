@@ -6,30 +6,57 @@ export default function App() {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${window.location.hostname}:8000/live`);
+    let ws;
+    let retryTimer;
 
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+    const connect = () => {
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${protocol}://${window.location.hostname}:8000/live`);
 
-      if (msg.event === "call_started") {
-        setConnected(true);
-        setData(null);
-        return;
-      }
+      ws.onopen = () => {
+        console.log("Dashboard connected");
+        setConnected(false); // wait for call_started event
+      };
 
-      if (msg.event === "call_ended") {
-        setConnected(false);
-        setData(null);
-        return;
-      }
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
 
-      if (!msg.transcript || !msg.type || !msg.severity) return;
-      msg.risks = msg.risks || [];
-      setData(msg);
+        // CALL EVENTS
+        if (msg.event === "call_started") {
+          setConnected(true);
+          setData(null);
+          return;
+        }
+
+        if (msg.event === "call_ended") {
+          setConnected(false);
+          setData(null);
+          return;
+        }
+
+        // Ignore partial packets
+        if (!msg.transcript) return;
+
+        msg.risks = msg.risks || [];
+        setData(msg);
+      };
+
+      ws.onclose = () => {
+        console.log("Dashboard disconnected — retrying...");
+        retryTimer = setTimeout(connect, 1000); // reconnect after 1s
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
     };
 
-    return () => ws.close();
+    connect();
+
+    return () => {
+      clearTimeout(retryTimer);
+      ws?.close();
+    };
   }, []);
 
   const severityStyle = {
@@ -125,6 +152,18 @@ export default function App() {
 
               <div className="bg-black/20 rounded-xl p-4">
                 <b>Risks:</b> {(data?.risks?.length ?? 0) > 0 ? data.risks.join(", ") : "None"}
+              </div>
+
+              <div className="bg-black/20 rounded-xl p-4">
+                <b>Risks:</b> {(data?.risks?.length ?? 0) > 0 ? data.risks.join(", ") : "None"}
+              </div>
+
+              <div className="bg-black/20 rounded-xl p-4">
+                <b>Victims:</b> {data?.location || "Unknown"}
+              </div>
+
+              <div className="bg-black/20 rounded-xl p-4">
+                <b>Location:</b> {data?.location || "Unknown"}
               </div>
 
               <div>

@@ -27,10 +27,20 @@ app.include_router(twilio_router)
 def home():
     return {"status": "RAPID-100 backend running"}
 
-def safe(obj):
-    if obj is None:
-        return ""
-    return str(obj).encode("utf-8", "ignore").decode("utf-8")
+
+# ================= LIVE INCIDENT MEMORY =================
+current_incident = {
+    "active": False,
+    "transcript": "",
+    "type": None,
+    "severity": None,
+    "department": None,
+    "risks": [],
+    "victims": None,
+    "location": None
+}
+# ========================================================
+
 
 # Initialize AI components
 transcriber = Transcriber()
@@ -43,10 +53,7 @@ dispatcher = Dispatcher()
 
 # Audio state
 SAMPLE_RATE = 16000
-SILENCE_TIMEOUT = 1.8
-
 buffer = b''
-last_audio_time = time.time()
 call_transcript = ""
 
 # Twilio chunk timer
@@ -54,14 +61,12 @@ twilio_last_process = time.time()
 TWILIO_CHUNK_SECONDS = 3.0
 
 
-# ---------------- Processing Function ----------------
+# ================= PROCESS AUDIO =================
 def process_audio(audio_bytes):
-    global call_transcript
-
-    if not audio_bytes:
-        return
+    global call_transcript, current_incident
 
     try:
+        # convert raw PCM → wav
         wav_io = io.BytesIO()
         with wave.open(wav_io, "wb") as wf:
             wf.setnchannels(1)
@@ -75,95 +80,69 @@ def process_audio(audio_bytes):
 
         print("\nProcessing speech segment...")
 
-        # ---- FAST CAPTION (instant UI feedback) ----
-        live_text = transcriber.transcribe_live("temp.wav")
-
-        if live_text.strip():
-            asyncio.create_task(manager.broadcast({
-                "transcript": safe(call_transcript + " " + live_text),
-                "type": "analyzing",
-                "severity": "low",
-                "department": "processing",
-                "risks": []
-            }))
-
-        # ---- FINAL ACCURATE TRANSCRIPTION ----
-        text = transcriber.transcribe_final("temp.wav")
+        # ---- TRANSCRIBE ----
+        text = transcriber.transcribe_live("temp.wav")
         text = language.normalize(text)
 
         print("FINAL:", text)
 
-        if not text.strip():
+        if not text or not text.strip():
             return
 
+        # accumulate conversation
         call_transcript += " " + text
 
+        # ---- AI PIPELINE ----
         category = classifier.predict(call_transcript)
         severity = severity_engine.score(call_transcript)
         entities = extractor.extract(call_transcript)
-
-        summary = summarizer.build_summary(call_transcript, category, severity, entities)
         department = dispatcher.route(category)
 
+        summary = summarizer.build_summary(call_transcript, category, severity, entities)
         notify(department, summary)
 
-        asyncio.create_task(manager.broadcast({
-            "transcript": safe(call_transcript),
-            "type": safe(category),
-            "severity": safe(severity),
-            "department": safe(department),
-            "risks": [safe(r) for r in entities.get("risks", [])]
-        }))
+        # ===== STORE STATE (IMPORTANT) =====
+        current_incident.update({
+            "active": True,
+            "transcript": call_transcript,
+            "type": category,
+            "severity": severity,
+            "department": department,
+            "risks": entities.get("risks", []),
+            "victims": entities.get("victims"),
+            "location": entities.get("location_hint")
+        })
+
+        # broadcast FULL state
+        asyncio.create_task(manager.broadcast(current_incident))
 
     except Exception:
         print("\n====== PROCESS ERROR ======")
         traceback.print_exc()
         print("===========================")
 
-# ---------------- Local Mic WebSocket ----------------
-@app.websocket("/audio")
-async def audio_stream(ws: WebSocket):
-    global buffer, last_audio_time, call_transcript
 
-    await ws.accept()
-    print("Client connected")
-
-    try:
-        while True:
-            try:
-                chunk = await asyncio.wait_for(ws.receive_bytes(), timeout=0.2)
-                buffer += chunk
-                last_audio_time = time.time()
-
-            except asyncio.TimeoutError:
-                if buffer and (time.time() - last_audio_time > SILENCE_TIMEOUT):
-                    process_audio(buffer)
-                    buffer = b''
-
-    except WebSocketDisconnect:
-        print("\nCaller disconnected")
-
-    finally:
-        buffer = b''
-        call_transcript = ""
-        print("Call ended\n")
-
-
-# ---------------- Dashboard WebSocket ----------------
+# ================= DASHBOARD SOCKET =================
 @app.websocket("/live")
 async def live_dashboard(ws: WebSocket):
     await manager.connect(ws)
+
+    # send current state immediately when operator joins
+    if current_incident["active"]:
+        await ws.send_json(current_incident)
+
     try:
         while True:
             await ws.receive_text()
     except:
         manager.disconnect(ws)
+        print("Dashboard disconnected")
 
 
-# ---------------- Twilio Phone Call Stream ----------------
+# ================= TWILIO MEDIA STREAM =================
 @app.websocket("/twilio-media")
 async def twilio_media(ws: WebSocket):
-    global buffer, last_audio_time, twilio_last_process, call_transcript
+    global buffer, call_transcript, twilio_last_process, current_incident
 
     await ws.accept()
     print("Twilio call connected")
@@ -173,32 +152,39 @@ async def twilio_media(ws: WebSocket):
             msg = await ws.receive_json()
             event = msg.get("event")
 
+            # ---- CALL START ----
             if event == "start":
                 print("Twilio stream started")
+
                 buffer = b''
                 call_transcript = ""
                 twilio_last_process = time.time()
 
-                # 🔔 tell dashboard call started
-                await manager.broadcast({
-                    "event": "call_started"
+                current_incident.update({
+                    "active": True,
+                    "transcript": "",
+                    "type": None,
+                    "severity": None,
+                    "department": None,
+                    "risks": [],
+                    "victims": None,
+                    "location": None
                 })
 
+                await manager.broadcast({"event": "call_started"})
                 continue
 
-            if event == "connected":
-                continue
-
+            # ---- CALL END ----
             if event == "stop":
                 print("Twilio call ended")
+
                 process_audio(buffer)
 
-                await manager.broadcast({
-                    "event": "call_ended"
-                })
-
+                current_incident["active"] = False
+                await manager.broadcast({"event": "call_ended"})
                 break
 
+            # ---- AUDIO ----
             if event == "media":
                 payload = msg["media"]["payload"]
 
@@ -207,9 +193,8 @@ async def twilio_media(ws: WebSocket):
                 pcm = audioop.ratecv(pcm, 2, 1, 8000, 16000, None)[0]
 
                 buffer += pcm
-                last_audio_time = time.time()
 
-                # ⬇️ NEW: process every few seconds
+                # process chunk every few seconds
                 if time.time() - twilio_last_process > TWILIO_CHUNK_SECONDS:
                     print("Processing Twilio audio chunk...")
                     process_audio(buffer)
