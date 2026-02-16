@@ -33,5 +33,3 @@ Thumbs.db
 
 # Secrets
 .env
-secrets.json
-credentials.json
